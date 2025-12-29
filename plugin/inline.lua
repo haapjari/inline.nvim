@@ -1,0 +1,2 @@
+-- lazy-load trigger for inline.nvim
+-- commands are registered when setup() is called
