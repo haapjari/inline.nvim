@@ -60,7 +60,7 @@ sequenceDiagram
   keys = {
     { "<leader>ai", "<cmd>InlineRun<cr>", desc = "run inline ai" },
   },
-  cmd = { "InlineRun", "InlineStatus", "InlineConfig", "InlineCancel" },
+  cmd = { "InlineRun", "InlineStatus", "InlineConfig", "InlineCancel", "InlineValidateConfig" },
 }
 ```
 
@@ -122,6 +122,37 @@ The prompt uses `%s` placeholders (in order):
 | `:InlineStatus`           | check opencode server status                          |
 | `:InlineConfig`           | show current configuration                            |
 | `:InlineCancel`           | cancel current request                                |
+| `:InlineValidateConfig`   | validate configuration against models.dev             |
+
+## Configuration Validation
+
+Run `:InlineValidateConfig` to validate your configuration with good taste. This checks:
+
+1. Local config (host, port, timeout ranges)
+2. OpenCode server health
+3. Provider name against [models.dev](https://models.dev) registry
+4. Model name against provider's model list
+
+```mermaid
+flowchart TD
+    A[InlineValidateConfig] --> B{Local Config Valid?}
+    B -->|No| C[Report Errors]
+    B -->|Yes| D{OpenCode Server Healthy?}
+    D -->|No| E[Report Server Error]
+    D -->|Yes| F{Provider Configured?}
+    F -->|No| G[Skip Provider Check]
+    F -->|Yes| H[Fetch models.dev]
+    H --> I{Provider Found?}
+    I -->|No| J[Warn + Suggest Similar]
+    I -->|Yes| K{Model Configured?}
+    K -->|No| L[Valid]
+    K -->|Yes| M{Model Found?}
+    M -->|No| N[Warn Model Unknown]
+    M -->|Yes| L
+    G --> L
+```
+
+> **Note**: Validation is on-demand only. Nothing runs automatically.
 
 ## Supported Comment Formats 
 

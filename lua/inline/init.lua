@@ -1021,6 +1021,11 @@ function M.setup(opts)
     bang = true,
   })
 
+  -- register :InlineValidateConfig command
+  vim.api.nvim_create_user_command("InlineValidateConfig", function()
+    M.validate_config()
+  end, { desc = "Validate configuration against models.dev" })
+
   -- set up keymap (unless disabled)
   if config.keymap ~= false then
     local key = config.keymap or "<leader>ai"
@@ -1058,6 +1063,113 @@ function M.show_config()
   end
 
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+end
+
+--- models.dev API URL for provider validation
+local MODELS_DEV_API = "https://models.dev/api.json"
+
+---Validate configuration against models.dev provider list.
+---Fetches known providers and checks if configured provider is valid.
+function M.validate_config()
+  vim.notify("validating configuration against models.dev...", vim.log.levels.INFO)
+
+  -- step 1: local validation
+  local errors = validate_config(config)
+  if #errors > 0 then
+    vim.notify(
+      "local validation failed:\n  " .. table.concat(errors, "\n  "),
+      vim.log.levels.ERROR
+    )
+    return
+  end
+
+  -- step 2: check opencode server health
+  check_health(function(healthy, version_or_err)
+    if not healthy then
+      vim.notify(
+        "opencode server check failed: " .. version_or_err,
+        vim.log.levels.ERROR
+      )
+      return
+    end
+
+    vim.notify("  opencode server: ok (v" .. version_or_err .. ")", vim.log.levels.INFO)
+
+    -- step 3: validate provider against models.dev (if provider is configured)
+    if not config.provider then
+      vim.notify("  provider: using opencode default (skipping validation)", vim.log.levels.INFO)
+      vim.notify("configuration valid", vim.log.levels.INFO)
+      return
+    end
+
+    -- fetch models.dev API
+    curl_async({
+      "curl",
+      "-s",
+      "--connect-timeout",
+      "5",
+      MODELS_DEV_API,
+    }, function(result, err)
+      if err then
+        vim.notify(
+          "  provider: could not fetch models.dev (" .. err .. ")",
+          vim.log.levels.WARN
+        )
+        vim.notify("configuration valid (provider not verified)", vim.log.levels.INFO)
+        return
+      end
+
+      -- parse json and extract provider keys
+      local ok, data = pcall(vim.fn.json_decode, result)
+      if not ok then
+        vim.notify("  provider: could not parse models.dev response", vim.log.levels.WARN)
+        vim.notify("configuration valid (provider not verified)", vim.log.levels.INFO)
+        return
+      end
+
+      -- check if provider exists in models.dev
+      if data[config.provider] then
+        vim.notify(
+          "  provider: '" .. config.provider .. "' is valid",
+          vim.log.levels.INFO
+        )
+
+        -- optionally validate model if configured
+        if config.model then
+          local provider_data = data[config.provider]
+          if provider_data.models and provider_data.models[config.model] then
+            vim.notify(
+              "  model: '" .. config.model .. "' is valid",
+              vim.log.levels.INFO
+            )
+          else
+            vim.notify(
+              "  model: '" .. config.model .. "' not found in " .. config.provider,
+              vim.log.levels.WARN
+            )
+          end
+        end
+
+        vim.notify("configuration valid", vim.log.levels.INFO)
+      else
+        -- provider not found - list similar ones
+        local suggestions = {}
+        for provider_name, _ in pairs(data) do
+          if provider_name:find(config.provider, 1, true) or
+             config.provider:find(provider_name, 1, true) then
+            table.insert(suggestions, provider_name)
+          end
+        end
+
+        local msg = "  provider: '" .. config.provider .. "' not found in models.dev"
+        if #suggestions > 0 then
+          msg = msg .. "\n  did you mean: " .. table.concat(suggestions, ", ") .. "?"
+        end
+        vim.notify(msg, vim.log.levels.WARN)
+        vim.notify("configuration has warnings", vim.log.levels.WARN)
+      end
+    end, { timeout = 10 })
+  end)
 end
 
 return M
