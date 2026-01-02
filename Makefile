@@ -19,11 +19,13 @@ HACK_DIR := hack
 LUA_FILES := $(shell find lua -name '*.lua' -type f)
 TEST_FILES := $(shell find tests -name '*_spec.lua' -type f 2>/dev/null)
 
-# neovim binary - override with: make test NVIM=/path/to/nvim
-NVIM ?= $(shell command -v nvim 2>/dev/null || echo "/home/haspe/tools/nvim.appimage")
-
 # tool versions
 LUACHECK_VERSION ?= 1.2.0
+NVIM_VERSION ?= 0.11.0
+
+# neovim binary - override with: make test NVIM=/path/to/nvim
+# checks: user override -> PATH -> local install
+NVIM ?= $(shell command -v nvim 2>/dev/null || echo "$(TOOLS_DIR)/nvim/usr/bin/nvim")
 
 # ============================================================================
 # HELP TARGETS
@@ -47,7 +49,7 @@ help:
 	@echo "  verify-lint    - run luacheck"
 	@echo ""
 	@echo "Development:"
-	@echo "  tools          - install development tools (luacheck)"
+	@echo "  tools          - install development tools (luacheck, nvim)"
 	@echo "  setup-hooks    - install git pre-commit hooks"
 	@echo ""
 	@echo "Variables:"
@@ -58,13 +60,26 @@ help:
 # TOOLS TARGETS
 # ============================================================================
 
-# ============================================================================
-# TOOLS TARGETS
-# ============================================================================
-
 .PHONY: tools
-tools: tool-luacheck
+tools: tool-luacheck tool-nvim
 	@echo "all tools installed!"
+
+.PHONY: tool-nvim
+tool-nvim:
+	@if command -v nvim >/dev/null 2>&1; then \
+		echo "nvim already installed: $$(nvim --version | head -1)"; \
+	elif [ -x "$(TOOLS_DIR)/nvim/usr/bin/nvim" ]; then \
+		echo "nvim already installed: $$($(TOOLS_DIR)/nvim/usr/bin/nvim --version | head -1)"; \
+	else \
+		echo "installing nvim $(NVIM_VERSION) to $(TOOLS_DIR)..."; \
+		mkdir -p $(TOOLS_DIR); \
+		curl -fsSL -o $(TOOLS_DIR)/nvim.appimage \
+			"https://github.com/neovim/neovim/releases/download/v$(NVIM_VERSION)/nvim-linux-x86_64.appimage"; \
+		chmod +x $(TOOLS_DIR)/nvim.appimage; \
+		cd $(TOOLS_DIR) && ./nvim.appimage --appimage-extract >/dev/null && mv squashfs-root nvim; \
+		rm -f $(TOOLS_DIR)/nvim.appimage; \
+		echo "nvim installed to $(TOOLS_DIR)/nvim/usr/bin/nvim"; \
+	fi
 
 .PHONY: tool-luacheck
 tool-luacheck:
@@ -127,8 +142,8 @@ test:
 	@if [ -z "$(TEST_FILES)" ]; then \
 		echo "  no test files found"; \
 	elif [ ! -x "$(NVIM)" ]; then \
-		echo "  nvim not found at $(NVIM), skipping tests"; \
-		echo "  set NVIM=/path/to/nvim to override"; \
+		echo "  nvim not found, skipping tests"; \
+		echo "  run 'make tools' to install, or set NVIM=/path/to/nvim"; \
 	else \
 		$(NVIM) --headless -u tests/minimal_init.lua \
 			-c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua'}"; \
