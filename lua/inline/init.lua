@@ -20,8 +20,14 @@ local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧",
 --- spinner animation interval in milliseconds
 local SPINNER_INTERVAL_MS = 80
 
---- curl connection timeout in seconds
-local CURL_TIMEOUT_SECS = 2
+--- curl connection timeout in seconds (for health check)
+local CURL_CONNECT_TIMEOUT_SECS = 2
+
+--- default request timeout in seconds (for LLM operations)
+local DEFAULT_REQUEST_TIMEOUT_SECS = 300
+
+--- timeout error message prefix for detection
+local TIMEOUT_ERROR_PREFIX = "timeout:"
 
 --------------------------------------------------------------------------------
 -- Namespaces
@@ -44,6 +50,7 @@ local spinner_ns = vim.api.nvim_create_namespace("inline_spinner")
 ---@field keymap string|false|nil Keymap binding (false to disable)
 ---@field prompt string|nil Custom prompt template path
 ---@field cache_prompt boolean|nil Cache prompt template in memory
+---@field timeout number|nil Request timeout in seconds (default 300)
 
 local defaults = {
   host = "127.0.0.1",
@@ -55,6 +62,7 @@ local defaults = {
   keymap = nil,
   prompt = nil,
   cache_prompt = nil,
+  timeout = nil,
 }
 
 --------------------------------------------------------------------------------
@@ -77,6 +85,16 @@ local prompt_cache = nil
 --- active spinners keyed by "bufnr:lnum"
 ---@type table<string, SpinnerState>
 local spinners = {}
+
+---@class JobState
+---@field job_id number Neovim job id
+---@field bufnr number Buffer number
+---@field lnum number Line number (1-indexed)
+---@field timeout_timer number|nil Timeout timer handle
+
+--- active jobs keyed by "bufnr:lnum"
+---@type table<string, JobState>
+local active_jobs = {}
 
 --------------------------------------------------------------------------------
 -- Spinner Functions (private)
@@ -227,7 +245,7 @@ end
 
 ---Clear the cached prompt template.
 ---Forces reload from disk on next get_prompt_template call.
-local function clear_prompt_cache()
+local function clear_prompt_cache() -- luacheck: ignore 211 (unused for now, public API planned)
   prompt_cache = nil
 end
 
@@ -268,15 +286,29 @@ end
 -- HTTP Functions (private)
 --------------------------------------------------------------------------------
 
+---@class CurlAsyncOpts
+---@field timeout number|nil Request timeout in seconds (adds --max-time to curl)
+
 ---Execute curl command asynchronously.
 ---Uses jobstart to avoid blocking the UI thread.
 ---@param args string[] Curl command arguments
 ---@param callback fun(result: string|nil, err: string|nil) Called with stdout or error
-local function curl_async(args, callback)
+---@param opts CurlAsyncOpts|nil Options for this request
+---@return number job_id Job handle for cancellation
+local function curl_async(args, callback, opts)
+  opts = opts or {}
   local stdout_chunks = {}
   local stderr_chunks = {}
+  local timed_out = false
 
-  vim.fn.jobstart(args, {
+  -- add timeout to curl args if specified
+  local final_args = vim.deepcopy(args)
+  if opts.timeout then
+    table.insert(final_args, 2, "--max-time")
+    table.insert(final_args, 3, tostring(opts.timeout))
+  end
+
+  local job_id = vim.fn.jobstart(final_args, {
     stdout_buffered = true,
     stderr_buffered = true,
 
@@ -302,37 +334,66 @@ local function curl_async(args, callback)
     on_exit = function(_, exit_code)
       -- schedule callback to run in main loop (safe for vim api calls)
       vim.schedule(function()
-        if exit_code ~= 0 then
-          callback(nil, "curl failed: " .. table.concat(stderr_chunks, "\n"))
+        if timed_out then
+          callback(nil, TIMEOUT_ERROR_PREFIX .. " request timed out after " .. opts.timeout .. "s")
+        elseif exit_code == 28 then
+          -- curl exit code 28 = operation timeout
+          callback(nil, TIMEOUT_ERROR_PREFIX .. " request timed out")
+        elseif exit_code ~= 0 then
+          local stderr = table.concat(stderr_chunks, "\n")
+          -- check for timeout-related errors in stderr
+          if stderr:match("timed out") or stderr:match("Operation timed out") then
+            callback(nil, TIMEOUT_ERROR_PREFIX .. " " .. stderr)
+          else
+            callback(nil, "curl failed (exit " .. exit_code .. "): " .. stderr)
+          end
         else
           callback(table.concat(stdout_chunks, ""), nil)
         end
       end)
     end,
   })
+
+  return job_id
+end
+
+---Cancel an active job by job_id.
+---@param job_id number Job handle from jobstart
+local function cancel_job(job_id)
+  if job_id and job_id > 0 then
+    pcall(vim.fn.jobstop, job_id)
+  end
 end
 
 ---Check OpenCode server health status.
 ---@param callback fun(healthy: boolean, version_or_err: string) Called with health result
+---@return number job_id Job handle for cancellation
 local function check_health(callback)
   local url = string.format("http://%s:%d/global/health", config.host, config.port)
 
-  curl_async({
+  return curl_async({
     "curl",
     "-s",
     "--connect-timeout",
-    tostring(CURL_TIMEOUT_SECS),
+    tostring(CURL_CONNECT_TIMEOUT_SECS),
     url,
   }, function(result, err)
     if err then
-      callback(false, err)
+      -- provide friendlier error messages
+      if err:match("^" .. TIMEOUT_ERROR_PREFIX) then
+        callback(false, "server not responding (timeout)")
+      elseif err:match("Connection refused") then
+        callback(false, "server not running (connection refused)")
+      else
+        callback(false, err)
+      end
       return
     end
 
     -- parse json response
     local ok, data = pcall(vim.fn.json_decode, result)
     if not ok then
-      callback(false, "invalid response")
+      callback(false, "invalid response from server")
       return
     end
 
@@ -340,15 +401,17 @@ local function check_health(callback)
     if data.healthy then
       callback(true, data.version or "unknown")
     else
-      callback(false, "server unhealthy")
+      callback(false, "server reports unhealthy status")
     end
-  end)
+  end, { timeout = CURL_CONNECT_TIMEOUT_SECS })
 end
 
 ---Create a new OpenCode session.
 ---@param callback fun(session_id: string|nil, err: string|nil) Called with session ID or error
+---@return number job_id Job handle for cancellation
 local function create_session(callback)
   local url = string.format("http://%s:%d/session", config.host, config.port)
+  local timeout = config.timeout or DEFAULT_REQUEST_TIMEOUT_SECS
 
   -- build request body with optional provider/model overrides
   local session_opts = vim.empty_dict()
@@ -361,7 +424,7 @@ local function create_session(callback)
 
   local body = vim.fn.json_encode(session_opts)
 
-  curl_async({
+  return curl_async({
     "curl",
     "-s",
     "-X",
@@ -373,25 +436,41 @@ local function create_session(callback)
     url,
   }, function(result, err)
     if err then
-      callback(nil, err)
+      -- provide friendlier error messages
+      if err:match("^" .. TIMEOUT_ERROR_PREFIX) then
+        callback(nil, "session creation timed out")
+      else
+        callback(nil, err)
+      end
       return
     end
 
     -- parse json response
     local ok, data = pcall(vim.fn.json_decode, result)
     if not ok then
-      callback(nil, "json decode failed: " .. result)
+      -- check if it looks like an error response
+      if result:match("invalid") or result:match("error") then
+        callback(nil, "server error: " .. result:sub(1, 200))
+      else
+        callback(nil, "invalid json response from server")
+      end
+      return
+    end
+
+    -- check for error in response (invalid provider/model)
+    if data.error then
+      callback(nil, "server error: " .. (data.error.message or data.error or "unknown"))
       return
     end
 
     -- validate session id exists
     if not data.id then
-      callback(nil, "no session id in response: " .. result)
+      callback(nil, "no session id in response")
       return
     end
 
     callback(data.id, nil)
-  end)
+  end, { timeout = timeout })
 end
 
 ---Send message to OpenCode session.
@@ -399,6 +478,7 @@ end
 ---@param message string Message content
 ---@param agent string|nil Agent name (optional)
 ---@param callback fun(response: string|nil, err: string|nil) Called with response text or error
+---@return number job_id Job handle for cancellation
 local function send_message(session_id, message, agent, callback)
   local url = string.format(
     "http://%s:%d/session/%s/message",
@@ -406,6 +486,7 @@ local function send_message(session_id, message, agent, callback)
     config.port,
     session_id
   )
+  local timeout = config.timeout or DEFAULT_REQUEST_TIMEOUT_SECS
 
   -- build request payload
   local msg_opts = {
@@ -421,7 +502,7 @@ local function send_message(session_id, message, agent, callback)
 
   local body = vim.fn.json_encode(msg_opts)
 
-  curl_async({
+  return curl_async({
     "curl",
     "-s",
     "-X",
@@ -433,14 +514,30 @@ local function send_message(session_id, message, agent, callback)
     url,
   }, function(result, err)
     if err then
-      callback(nil, err)
+      -- provide friendlier error messages
+      if err:match("^" .. TIMEOUT_ERROR_PREFIX) then
+        callback(nil, "request timed out (LLM may be slow or server crashed)")
+      else
+        callback(nil, err)
+      end
       return
     end
 
     -- parse json response
     local ok, data = pcall(vim.fn.json_decode, result)
     if not ok then
-      callback(nil, "json decode failed: " .. result)
+      -- check if it looks like an error response
+      if result:match("error") or result:match("crash") then
+        callback(nil, "server error: " .. result:sub(1, 200))
+      else
+        callback(nil, "invalid json response from server")
+      end
+      return
+    end
+
+    -- check for error in response
+    if data.error then
+      callback(nil, "server error: " .. (data.error.message or data.error or "unknown"))
       return
     end
 
@@ -456,8 +553,8 @@ local function send_message(session_id, message, agent, callback)
       return
     end
 
-    callback(nil, "no parts in response: " .. result)
-  end)
+    callback(nil, "no content in response")
+  end, { timeout = timeout })
 end
 
 --------------------------------------------------------------------------------
@@ -677,26 +774,49 @@ function M.run(opts)
   -- start visual feedback
   start_spinner(bufnr, lnum)
 
+  local key = spinner_key(bufnr, lnum)
+
+  ---Cleanup function to stop spinner and remove job tracking
+  local function cleanup()
+    stop_spinner(bufnr, lnum)
+    active_jobs[key] = nil
+  end
+
   -- async chain: health check -> create session -> send message
-  check_health(function(healthy, version_or_err)
+  local job_id = check_health(function(healthy, version_or_err)
+    -- check if cancelled
+    if not active_jobs[key] then
+      return
+    end
+
     if not healthy then
-      stop_spinner(bufnr, lnum)
+      cleanup()
       vim.notify("opencode server not available: " .. version_or_err, vim.log.levels.ERROR)
       return
     end
 
-    create_session(function(session_id, err)
-      if not session_id then
-        stop_spinner(bufnr, lnum)
-        vim.notify("error creating session: " .. err, vim.log.levels.ERROR)
+    local session_job_id = create_session(function(session_id, err)
+      -- check if cancelled
+      if not active_jobs[key] then
         return
       end
 
-      send_message(session_id, message, agent, function(response, send_err)
-        stop_spinner(bufnr, lnum)
+      if not session_id then
+        cleanup()
+        vim.notify("session creation failed: " .. err, vim.log.levels.ERROR)
+        return
+      end
+
+      local msg_job_id = send_message(session_id, message, agent, function(response, send_err)
+        -- check if cancelled
+        if not active_jobs[key] then
+          return
+        end
+
+        cleanup()
 
         if not response then
-          vim.notify("error: " .. send_err, vim.log.levels.ERROR)
+          vim.notify("request failed: " .. send_err, vim.log.levels.ERROR)
           return
         end
 
@@ -711,8 +831,25 @@ function M.run(opts)
         -- insert response into buffer
         insert_response(bufnr, lnum, response)
       end)
+
+      -- update job tracking to message job
+      if active_jobs[key] then
+        active_jobs[key].job_id = msg_job_id
+      end
     end)
+
+    -- update job tracking to session job
+    if active_jobs[key] then
+      active_jobs[key].job_id = session_job_id
+    end
   end)
+
+  -- track the active job for cancellation
+  active_jobs[key] = {
+    job_id = job_id,
+    bufnr = bufnr,
+    lnum = lnum,
+  }
 end
 
 ---Check OpenCode server health and display status.
@@ -721,10 +858,10 @@ function M.status()
 
   check_health(function(healthy, version_or_err)
     if healthy then
-      vim.notify(
-        string.format("opencode server: ok (v%s) at %s:%d", version_or_err, config.host, config.port),
-        vim.log.levels.INFO
+      local msg = string.format(
+        "opencode server: ok (v%s) at %s:%d", version_or_err, config.host, config.port
       )
+      vim.notify(msg, vim.log.levels.INFO)
     else
       vim.notify(
         string.format("opencode server: not available (%s)", version_or_err),
@@ -734,6 +871,89 @@ function M.status()
   end)
 end
 
+---Cancel active request at cursor position or all requests.
+---@param opts { all: boolean|nil }|nil Options for cancel
+function M.cancel(opts)
+  opts = opts or {}
+
+  if opts.all then
+    -- cancel all active requests
+    local count = 0
+    for key, job_state in pairs(active_jobs) do
+      cancel_job(job_state.job_id)
+      stop_spinner(job_state.bufnr, job_state.lnum)
+      active_jobs[key] = nil
+      count = count + 1
+    end
+    if count > 0 then
+      vim.notify(string.format("cancelled %d request(s)", count), vim.log.levels.INFO)
+    else
+      vim.notify("no active requests to cancel", vim.log.levels.WARN)
+    end
+    return
+  end
+
+  -- cancel request at cursor position
+  local bufnr = vim.api.nvim_get_current_buf()
+  local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
+
+  -- search backwards for active request (same as find_ai_comment logic)
+  for i = cursor_lnum, 1, -1 do
+    local key = spinner_key(bufnr, i)
+    local job_state = active_jobs[key]
+    if job_state then
+      cancel_job(job_state.job_id)
+      stop_spinner(job_state.bufnr, job_state.lnum)
+      active_jobs[key] = nil
+      vim.notify("request cancelled", vim.log.levels.INFO)
+      return
+    end
+  end
+
+  vim.notify("no active request found at or above cursor", vim.log.levels.WARN)
+end
+
+---Validate configuration and return list of errors.
+---@param cfg InlineConfig Configuration to validate
+---@return string[] errors List of validation errors (empty if valid)
+local function validate_config(cfg)
+  local errors = {}
+
+  -- validate host
+  if type(cfg.host) ~= "string" or cfg.host == "" then
+    table.insert(errors, "host must be a non-empty string")
+  end
+
+  -- validate port
+  if type(cfg.port) ~= "number" or cfg.port < 1 or cfg.port > 65535 then
+    table.insert(errors, "port must be a number between 1 and 65535")
+  end
+
+  -- validate timeout if specified
+  if cfg.timeout ~= nil then
+    if type(cfg.timeout) ~= "number" or cfg.timeout < 1 then
+      table.insert(errors, "timeout must be a positive number (seconds)")
+    end
+  end
+
+  -- validate provider if specified (basic check - not empty string)
+  if cfg.provider ~= nil and (type(cfg.provider) ~= "string" or cfg.provider == "") then
+    table.insert(errors, "provider must be a non-empty string or nil")
+  end
+
+  -- validate model if specified
+  if cfg.model ~= nil and (type(cfg.model) ~= "string" or cfg.model == "") then
+    table.insert(errors, "model must be a non-empty string or nil")
+  end
+
+  -- validate agent
+  if type(cfg.agent) ~= "string" or cfg.agent == "" then
+    table.insert(errors, "agent must be a non-empty string")
+  end
+
+  return errors
+end
+
 ---Configure inline.nvim and register commands/keymaps.
 ---@param opts InlineConfig|nil User configuration options
 function M.setup(opts)
@@ -741,6 +961,16 @@ function M.setup(opts)
 
   -- merge user options over defaults
   config = vim.tbl_deep_extend("force", defaults, opts)
+
+  -- validate configuration
+  local errors = validate_config(config)
+  if #errors > 0 then
+    vim.notify(
+      "inline.nvim: configuration errors:\n  " .. table.concat(errors, "\n  "),
+      vim.log.levels.ERROR
+    )
+    -- don't return - still set up commands so user can fix and retry
+  end
 
   -- register :InlineRun command with optional agent override
   vim.api.nvim_create_user_command("InlineRun", function(cmd_opts)
@@ -782,6 +1012,20 @@ function M.setup(opts)
     M.show_config()
   end, { desc = "Show inline.nvim configuration" })
 
+  -- register :InlineCancel command
+  vim.api.nvim_create_user_command("InlineCancel", function(cmd_opts)
+    local all = cmd_opts.bang
+    M.cancel({ all = all })
+  end, {
+    desc = "Cancel active inline AI request (use ! to cancel all)",
+    bang = true,
+  })
+
+  -- register :InlineValidateConfig command
+  vim.api.nvim_create_user_command("InlineValidateConfig", function()
+    M.validate_config()
+  end, { desc = "Validate configuration against models.dev" })
+
   -- set up keymap (unless disabled)
   if config.keymap ~= false then
     local key = config.keymap or "<leader>ai"
@@ -819,6 +1063,113 @@ function M.show_config()
   end
 
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+end
+
+--- models.dev API URL for provider validation
+local MODELS_DEV_API = "https://models.dev/api.json"
+
+---Validate configuration against models.dev provider list.
+---Fetches known providers and checks if configured provider is valid.
+function M.validate_config()
+  vim.notify("validating configuration against models.dev...", vim.log.levels.INFO)
+
+  -- step 1: local validation
+  local errors = validate_config(config)
+  if #errors > 0 then
+    vim.notify(
+      "local validation failed:\n  " .. table.concat(errors, "\n  "),
+      vim.log.levels.ERROR
+    )
+    return
+  end
+
+  -- step 2: check opencode server health
+  check_health(function(healthy, version_or_err)
+    if not healthy then
+      vim.notify(
+        "opencode server check failed: " .. version_or_err,
+        vim.log.levels.ERROR
+      )
+      return
+    end
+
+    vim.notify("  opencode server: ok (v" .. version_or_err .. ")", vim.log.levels.INFO)
+
+    -- step 3: validate provider against models.dev (if provider is configured)
+    if not config.provider then
+      vim.notify("  provider: using opencode default (skipping validation)", vim.log.levels.INFO)
+      vim.notify("configuration valid", vim.log.levels.INFO)
+      return
+    end
+
+    -- fetch models.dev API
+    curl_async({
+      "curl",
+      "-s",
+      "--connect-timeout",
+      "5",
+      MODELS_DEV_API,
+    }, function(result, err)
+      if err then
+        vim.notify(
+          "  provider: could not fetch models.dev (" .. err .. ")",
+          vim.log.levels.WARN
+        )
+        vim.notify("configuration valid (provider not verified)", vim.log.levels.INFO)
+        return
+      end
+
+      -- parse json and extract provider keys
+      local ok, data = pcall(vim.fn.json_decode, result)
+      if not ok then
+        vim.notify("  provider: could not parse models.dev response", vim.log.levels.WARN)
+        vim.notify("configuration valid (provider not verified)", vim.log.levels.INFO)
+        return
+      end
+
+      -- check if provider exists in models.dev
+      if data[config.provider] then
+        vim.notify(
+          "  provider: '" .. config.provider .. "' is valid",
+          vim.log.levels.INFO
+        )
+
+        -- optionally validate model if configured
+        if config.model then
+          local provider_data = data[config.provider]
+          if provider_data.models and provider_data.models[config.model] then
+            vim.notify(
+              "  model: '" .. config.model .. "' is valid",
+              vim.log.levels.INFO
+            )
+          else
+            vim.notify(
+              "  model: '" .. config.model .. "' not found in " .. config.provider,
+              vim.log.levels.WARN
+            )
+          end
+        end
+
+        vim.notify("configuration valid", vim.log.levels.INFO)
+      else
+        -- provider not found - list similar ones
+        local suggestions = {}
+        for provider_name, _ in pairs(data) do
+          if provider_name:find(config.provider, 1, true) or
+             config.provider:find(provider_name, 1, true) then
+            table.insert(suggestions, provider_name)
+          end
+        end
+
+        local msg = "  provider: '" .. config.provider .. "' not found in models.dev"
+        if #suggestions > 0 then
+          msg = msg .. "\n  did you mean: " .. table.concat(suggestions, ", ") .. "?"
+        end
+        vim.notify(msg, vim.log.levels.WARN)
+        vim.notify("configuration has warnings", vim.log.levels.WARN)
+      end
+    end, { timeout = 10 })
+  end)
 end
 
 return M
