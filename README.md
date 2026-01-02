@@ -60,7 +60,7 @@ sequenceDiagram
   keys = {
     { "<leader>ai", "<cmd>InlineRun<cr>", desc = "run inline ai" },
   },
-  cmd = { "InlineRun", "InlineStatus", "InlineConfig" },
+  cmd = { "InlineRun", "InlineStatus", "InlineConfig", "InlineCancel" },
 }
 ```
 
@@ -121,6 +121,7 @@ The prompt uses `%s` placeholders (in order):
 | `:InlineRun agent=<name>` | override default or configured agent for this request |
 | `:InlineStatus`           | check opencode server status                          |
 | `:InlineConfig`           | show current configuration                            |
+| `:InlineCancel`           | cancel current request                                |
 
 ## Supported Comment Formats 
 
