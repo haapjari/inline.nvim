@@ -219,13 +219,27 @@ describe("inline.nvim error handling", function()
   end)
 end)
 
+--- Get a free port by binding to port 0 and releasing it.
+--- The OS assigns an available port which we then close.
+---@return number port A port that is guaranteed to be free
+local function get_free_port()
+  local socket = vim.uv.new_tcp()
+  socket:bind("127.0.0.1", 0)
+  local addr = socket:getsockname()
+  local port = addr.port
+  socket:close()
+  return port
+end
+
 describe("inline.nvim server errors", function()
   describe("health check", function()
     it("reports connection refused gracefully", function()
-      -- configure with a port that's likely not running
+      -- get a free port that definitely has no server
+      local free_port = get_free_port()
+
       inline.setup({
         host = "127.0.0.1",
-        port = 59999, -- unlikely to have a server
+        port = free_port,
         timeout = 1,
       })
 
