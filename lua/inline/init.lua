@@ -11,7 +11,7 @@
 ---@field show_config fun(): nil Display current configuration
 local M = {}
 
-M.version = "0.0.2"
+M.version = "0.0.3"
 
 --------------------------------------------------------------------------------
 -- Constants
@@ -98,6 +98,25 @@ local spinners = {}
 --- active jobs keyed by "bufnr:lnum"
 ---@type table<string, JobState>
 local active_jobs = {}
+
+---@class QueuedRequest
+---@field bufnr number Buffer number
+---@field lnum number Line number (1-indexed)
+---@field instruction string The @ai instruction text
+---@field original_line string Original content of the @ai line
+---@field buffer_content string Numbered buffer content at queue time
+---@field filename string Buffer filename
+---@field filetype string Buffer filetype
+---@field agent string Agent to use
+---@field opts InlineRunOpts|nil Options passed to run()
+
+--- pending request queues keyed by buffer number
+---@type table<number, QueuedRequest[]>
+local buffer_queues = {}
+
+--- buffers currently processing a request
+---@type table<number, boolean>
+local busy_buffers = {}
 
 --------------------------------------------------------------------------------
 -- Spinner Functions (private)
@@ -770,69 +789,93 @@ local function insert_response(bufnr, fallback_lnum, response)
 end
 
 --------------------------------------------------------------------------------
--- Public API
+-- Queue Functions (private)
 --------------------------------------------------------------------------------
 
----@class InlineRunOpts
----@field agent string|nil Agent override for this request
+-- forward declaration for execute_request (needed by process_next_in_queue)
+local execute_request
 
----Run inline AI completion for the nearest @ai comment.
----Finds the @ai comment above cursor, sends request to OpenCode,
----and replaces the specified line range with the response.
----@param opts InlineRunOpts|nil Options for this run
-function M.run(opts)
-  opts = opts or {}
-
-  -- find @ai comment above cursor
-  local instruction, lnum = find_ai_comment()
-  if not instruction or instruction == "" then
-    vim.notify("no @ai comment found", vim.log.levels.WARN)
+---Process the next queued request for a buffer.
+---Called after a request completes, errors, or is cancelled.
+---@param bufnr number Buffer number
+local function process_next_in_queue(bufnr)
+  local queue = buffer_queues[bufnr]
+  if not queue or #queue == 0 then
+    -- no pending requests, mark buffer as not busy
+    busy_buffers[bufnr] = nil
     return
   end
 
-  local bufnr = vim.api.nvim_get_current_buf()
+  -- get next request from queue
+  local request = table.remove(queue, 1)
 
-  -- prevent concurrent runs on same line
-  if is_processing(bufnr, lnum) then
-    vim.notify("already processing this line", vim.log.levels.WARN)
+  -- verify buffer still exists
+  if not vim.api.nvim_buf_is_valid(request.bufnr) then
+    -- buffer was closed, skip this request and try next
+    process_next_in_queue(bufnr)
     return
   end
 
-  -- capture buffer context before async operations
-  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local original_ai_line = lines[lnum]
+  -- re-verify the @ai line still matches what we captured
+  local current_lines = vim.api.nvim_buf_get_lines(request.bufnr, 0, -1, false)
+  local current_line = current_lines[request.lnum]
+  if current_line ~= request.original_line then
+    vim.notify(
+      string.format("queued request for line %d skipped: line was modified", request.lnum),
+      vim.log.levels.WARN
+    )
+    -- try next request in queue
+    process_next_in_queue(bufnr)
+    return
+  end
 
-  -- build numbered line content for context
+  -- re-capture buffer content since it may have changed
   local numbered_lines = {}
-  for i, line in ipairs(lines) do
+  for i, line in ipairs(current_lines) do
     table.insert(numbered_lines, string.format("%d: %s", i, line))
   end
-  local buffer_content = table.concat(numbered_lines, "\n")
+  request.buffer_content = table.concat(numbered_lines, "\n")
 
-  local filename = vim.fn.expand("%:t")
-  local filetype = vim.bo.filetype
+  -- execute the queued request
+  execute_request(request)
+end
 
-  -- resolve agent: command override > buffer-local > filetype mapping > default
-  local agent = opts.agent or vim.b.inline_agent or get_agent()
+---Execute a request (either immediate or from queue).
+---@param request QueuedRequest Request to execute
+execute_request = function(request)
+  local bufnr = request.bufnr
+  local lnum = request.lnum
+
+  -- mark buffer as busy
+  busy_buffers[bufnr] = true
 
   -- build the prompt with all context
-  local message = build_prompt(filename, filetype, buffer_content, lnum, instruction)
+  local message = build_prompt(
+    request.filename,
+    request.filetype,
+    request.buffer_content,
+    lnum,
+    request.instruction
+  )
 
   -- start visual feedback
   start_spinner(bufnr, lnum)
 
   local key = spinner_key(bufnr, lnum)
 
-  ---Cleanup function to stop spinner and remove job tracking
+  ---Cleanup function to stop spinner, remove job tracking, and process queue
   local function cleanup()
     stop_spinner(bufnr, lnum)
     active_jobs[key] = nil
+    -- process next request in queue (or mark buffer as not busy)
+    process_next_in_queue(bufnr)
   end
 
   -- async chain: health check -> create session -> send message
   local job_id = check_health(function(healthy, version_or_err)
     -- check if cancelled
     if not active_jobs[key] then
+      process_next_in_queue(bufnr)
       return
     end
 
@@ -845,6 +888,7 @@ function M.run(opts)
     local session_job_id = create_session(function(session_id, err)
       -- check if cancelled
       if not active_jobs[key] then
+        process_next_in_queue(bufnr)
         return
       end
 
@@ -854,9 +898,10 @@ function M.run(opts)
         return
       end
 
-      local msg_job_id = send_message(session_id, message, agent, function(response, send_err)
+      local msg_job_id = send_message(session_id, message, request.agent, function(response, send_err)
         -- check if cancelled
         if not active_jobs[key] then
+          process_next_in_queue(bufnr)
           return
         end
 
@@ -870,7 +915,7 @@ function M.run(opts)
         -- verify @ai line wasn't modified during async operation
         local current_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
         local current_ai_line = current_lines[lnum]
-        if current_ai_line ~= original_ai_line then
+        if current_ai_line ~= request.original_line then
           vim.notify("@ai line was modified, response discarded", vim.log.levels.WARN)
           return
         end
@@ -899,6 +944,104 @@ function M.run(opts)
   }
 end
 
+---Queue a request for later execution.
+---@param request QueuedRequest Request to queue
+local function queue_request(request)
+  local bufnr = request.bufnr
+  if not buffer_queues[bufnr] then
+    buffer_queues[bufnr] = {}
+  end
+  table.insert(buffer_queues[bufnr], request)
+
+  local queue_position = #buffer_queues[bufnr]
+  vim.notify(
+    string.format("request queued (position %d)", queue_position),
+    vim.log.levels.INFO
+  )
+end
+
+--------------------------------------------------------------------------------
+-- Public API
+--------------------------------------------------------------------------------
+
+---@class InlineRunOpts
+---@field agent string|nil Agent override for this request
+
+---Run inline AI completion for the nearest @ai comment.
+---Finds the @ai comment above cursor, sends request to OpenCode,
+---and replaces the specified line range with the response.
+---If buffer is busy, request is queued for later execution.
+---@param opts InlineRunOpts|nil Options for this run
+function M.run(opts)
+  opts = opts or {}
+
+  -- find @ai comment above cursor
+  local instruction, lnum = find_ai_comment()
+  if not instruction or instruction == "" then
+    vim.notify("no @ai comment found", vim.log.levels.WARN)
+    return
+  end
+
+  local bufnr = vim.api.nvim_get_current_buf()
+
+  -- prevent duplicate runs on same line (already processing or already queued)
+  if is_processing(bufnr, lnum) then
+    vim.notify("already processing this line", vim.log.levels.WARN)
+    return
+  end
+
+  -- check if this line is already in the queue
+  local queue = buffer_queues[bufnr]
+  if queue then
+    for _, req in ipairs(queue) do
+      if req.lnum == lnum then
+        vim.notify("this line is already queued", vim.log.levels.WARN)
+        return
+      end
+    end
+  end
+
+  -- capture buffer context before async operations
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local original_ai_line = lines[lnum]
+
+  -- build numbered line content for context
+  local numbered_lines = {}
+  for i, line in ipairs(lines) do
+    table.insert(numbered_lines, string.format("%d: %s", i, line))
+  end
+  local buffer_content = table.concat(numbered_lines, "\n")
+
+  local filename = vim.fn.expand("%:t")
+  local filetype = vim.bo.filetype
+
+  -- resolve agent: command override > buffer-local > filetype mapping > default
+  local agent = opts.agent or vim.b.inline_agent or get_agent()
+
+  -- build the request
+  ---@type QueuedRequest
+  local request = {
+    bufnr = bufnr,
+    lnum = lnum,
+    instruction = instruction,
+    original_line = original_ai_line,
+    buffer_content = buffer_content,
+    filename = filename,
+    filetype = filetype,
+    agent = agent,
+    opts = opts,
+  }
+
+  -- if buffer is busy, queue the request
+  if busy_buffers[bufnr] then
+    queue_request(request)
+    return
+  end
+
+  -- execute immediately
+  execute_request(request)
+end
+
 ---Check OpenCode server health and display status.
 function M.status()
   vim.notify("checking opencode server...", vim.log.levels.INFO)
@@ -924,18 +1067,30 @@ function M.cancel(opts)
   opts = opts or {}
 
   if opts.all then
-    -- cancel all active requests
+    -- cancel all active requests and clear all queues
     local count = 0
+    local queued_count = 0
+
+    -- cancel active jobs
     for key, job_state in pairs(active_jobs) do
       cancel_job(job_state.job_id)
       stop_spinner(job_state.bufnr, job_state.lnum)
       active_jobs[key] = nil
       count = count + 1
     end
-    if count > 0 then
-      vim.notify(string.format("cancelled %d request(s)", count), vim.log.levels.INFO)
+
+    -- clear all queues
+    for bufnr, queue in pairs(buffer_queues) do
+      queued_count = queued_count + #queue
+      buffer_queues[bufnr] = nil
+      busy_buffers[bufnr] = nil
+    end
+
+    if count > 0 or queued_count > 0 then
+      local msg = string.format("cancelled %d active, %d queued request(s)", count, queued_count)
+      vim.notify(msg, vim.log.levels.INFO)
     else
-      vim.notify("no active requests to cancel", vim.log.levels.WARN)
+      vim.notify("no active or queued requests to cancel", vim.log.levels.WARN)
     end
     return
   end
@@ -953,11 +1108,25 @@ function M.cancel(opts)
       stop_spinner(job_state.bufnr, job_state.lnum)
       active_jobs[key] = nil
       vim.notify("request cancelled", vim.log.levels.INFO)
+      -- process next request in queue for this buffer
+      process_next_in_queue(bufnr)
       return
     end
   end
 
-  vim.notify("no active request found at or above cursor", vim.log.levels.WARN)
+  -- check if cursor is on a queued request
+  local queue = buffer_queues[bufnr]
+  if queue then
+    for idx, req in ipairs(queue) do
+      if req.lnum == cursor_lnum then
+        table.remove(queue, idx)
+        vim.notify("queued request cancelled", vim.log.levels.INFO)
+        return
+      end
+    end
+  end
+
+  vim.notify("no active or queued request found at or above cursor", vim.log.levels.WARN)
 end
 
 ---Validate configuration and return list of errors.
@@ -1230,9 +1399,40 @@ end
 ---@class InlineTestInterface
 ---@field parse_response fun(response: string): number|nil, number|nil, string[]|nil, string|nil
 ---@field strip_code_fences fun(text: string): string
+---@field get_buffer_queues fun(): table<number, QueuedRequest[]>
+---@field get_busy_buffers fun(): table<number, boolean>
+---@field is_buffer_busy fun(bufnr: number): boolean
+---@field get_queue_length fun(bufnr: number): number
+---@field clear_all_state fun(): nil
 M._test = {
   parse_response = parse_response,
   strip_code_fences = strip_code_fences,
+
+  -- queue state accessors for testing
+  get_buffer_queues = function()
+    return buffer_queues
+  end,
+  get_busy_buffers = function()
+    return busy_buffers
+  end,
+  is_buffer_busy = function(bufnr)
+    return busy_buffers[bufnr] == true
+  end,
+  get_queue_length = function(bufnr)
+    local queue = buffer_queues[bufnr]
+    return queue and #queue or 0
+  end,
+  -- reset all state for clean test isolation
+  clear_all_state = function()
+    buffer_queues = {}
+    busy_buffers = {}
+    for key, job_state in pairs(active_jobs) do
+      pcall(cancel_job, job_state.job_id)
+      pcall(stop_spinner, job_state.bufnr, job_state.lnum)
+      active_jobs[key] = nil
+    end
+    spinners = {}
+  end,
 }
 
 return M

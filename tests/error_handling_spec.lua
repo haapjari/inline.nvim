@@ -189,7 +189,7 @@ describe("inline.nvim error handling", function()
 
       vim.notify = original_notify
       assert.is_not_nil(warn_msg)
-      assert.matches("no active requests to cancel", warn_msg)
+      assert.matches("no active or queued requests to cancel", warn_msg)
     end)
 
     it("handles cancel at cursor with no active request", function()
@@ -211,7 +211,7 @@ describe("inline.nvim error handling", function()
 
       vim.notify = original_notify
       assert.is_not_nil(warn_msg)
-      assert.matches("no active request found", warn_msg)
+      assert.matches("no active or queued request found", warn_msg)
 
       -- cleanup
       vim.api.nvim_buf_delete(bufnr, { force = true })
