@@ -56,7 +56,7 @@ sequenceDiagram
 
 ## Requirements
 
-- I tested this with nvim `v0.11.1` and OpenCode `v1.0.205`.
+- I tested this with nvim `v0.11.1` and OpenCode `v1.0.223`.
 - You want to have [OpenCode](https://opencode.ai) server running (`opencode serve --port 4096`) -- or in a custom port.
 
 ## Installation
