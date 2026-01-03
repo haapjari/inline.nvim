@@ -50,7 +50,7 @@ sequenceDiagram
 {
   "haapjari/inline.nvim",
   config = function()
-    require("inline").setup({
+
       -- optional: override provider/model (defaults to OpenCode's config)
       -- provider = "anthropic",
       -- model = "claude-sonnet-4-5",
@@ -94,10 +94,10 @@ require("inline").setup({
   provider = "anthropic",
   model = "claude-sonnet-4-5",
   
-  -- default agent
+  -- default agent (used when no filetype mapping matches)
   agent = "build",  -- default
   
-  -- per-filetype agent mapping
+  -- per-filetype agent mapping (see "Agents" section below)
   agents = {
     go = "go",
     python = "python",
@@ -110,6 +110,82 @@ require("inline").setup({
   prompt = "~/.config/nvim/my-inline-prompt.md",
 })
 ```
+
+## Agents
+
+> **Note**: Agent configuration is entirely optional. If you omit the `agents` table, all requests use the default `build` agent which works out of the box.
+
+The `agents` table maps `nvim` filetypes to OpenCode agent names. When you run `:InlineRun`, the plugin checks the current buffer's filetype and uses the corresponding agent.
+
+```lua
+agents = {
+  go = "go",         -- *.go files use the "go" agent
+  python = "python", -- *.py files use the "python" agent
+  rust = "rust",     -- *.rs files use the "rust" agent
+},
+```
+
+**How it Works:**
+
+1. You run `:InlineRun` in a Go file
+2. Plugin detects filetype is `go`
+3. Looks up `agents["go"]` → finds `"go"`
+4. Sends the request to OpenCode with `agent = "go"`
+5. If no mapping exists, falls back to the `agent` default (`"build"`)
+
+**Override Per-Request:** Use `:InlineRun agent=<name>` to bypass the filetype mapping for a single request.
+
+### Built-in OpenCode Agents
+
+OpenCode comes with these agents out of the box:
+
+| Agent | Mode | Description |
+|-------|------|-------------|
+| `build` | primary | Default agent with all tools enabled |
+| `plan` | primary | Analysis and planning without making changes |
+| `general` | subagent | General-purpose research and multi-step tasks |
+| `explore` | subagent | Fast codebase exploration and file searching |
+
+### Custom Agents
+
+The agent name in your `agents` table must exist in your OpenCode configuration. Define agents in `~/.config/opencode/opencode.json` (global) or `.opencode/opencode.json` (per-project).
+
+**Example:** Define a `go` agent in your `opencode.json`:
+
+```json
+{
+  "agent": {
+    "go": {
+      "model": "anthropic/claude-sonnet-4-5",
+      "prompt": "{file:./prompts/go.md}",
+      "tools": { "bash": true },
+      "permission": {
+        "edit": "allow",
+        "bash": {
+          "*": "deny",
+          "go test *": "allow",
+          "go build *": "allow"
+        }
+      }
+    }
+  }
+}
+```
+
+Then create your prompt at `~/.config/opencode/prompts/go.md`:
+
+```markdown
+You are a Go expert. Follow these conventions:
+
+- Use standard library when possible
+- Format with gofumpt
+- No globals, prefer dependency injection
+- Error wrapping with fmt.Errorf("context: %w", err)
+```
+
+Now when you run `:InlineRun` in a Go file, it uses your `go` agent with its custom prompt and permissions. This is a handy way to create agents, with as much autonomy - but restrict critical stuff - like deleting or removing stuff from the file system.
+
+See [OpenCode Agents documentation](https://opencode.ai/docs/agents/) for more configuration options.
 
 ## Custom Prompt
 
