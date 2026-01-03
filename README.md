@@ -7,6 +7,23 @@
 
 Simple inline code generation plugin for [nvim](https://neovim.io), which uses [OpenCode](https://opencode.ai) as a backend.
 
+## Scope
+
+This plugin is designed for **single-buffer, in-place edits**:
+
+- Generate a function from a signature
+- Add documentation or comments
+- Fix a bug in a specific block
+- Refactor a small section of code
+
+It is **not** intended for:
+
+- Multi-file refactoring
+- Large-scale codebase changes
+- Complex implementations spanning multiple files
+
+For those use cases, use [OpenCode](https://opencode.ai) directly, your editor's refactoring tools, or other agentic coding assistants.
+
 ## How-To: Use
 
 - Annotate your code with an instruction `// @ai <instruction>` comment in your code, trigger the plugin with `:InlineRun`, and the plugin will replace it with the OpenCode response.
