@@ -57,7 +57,7 @@ local spinner_ns = vim.api.nvim_create_namespace("inline_spinner")
 
 local defaults = {
   host = "127.0.0.1",
-  port = 4096,
+  port = nil, -- nil = auto-discover from running OpenCode process
   provider = nil,
   model = nil,
   agent = "build",
@@ -117,6 +117,160 @@ local buffer_queues = {}
 --- buffers currently processing a request
 ---@type table<number, boolean>
 local busy_buffers = {}
+
+--- cached discovered port (nil = not yet discovered)
+---@type number|nil
+local discovered_port = nil
+
+--------------------------------------------------------------------------------
+-- Port Discovery Functions (private)
+--------------------------------------------------------------------------------
+
+---@class PortCandidate
+---@field port number Port number
+---@field pid string Process ID
+
+---Parse a single line of ss output to extract port and pid.
+---Expected format: "LISTEN ... 127.0.0.1:PORT ... users:(("opencode",pid=XXXXX,fd=NN))"
+---@param line string Single line from ss -tlnp output
+---@return PortCandidate|nil candidate Parsed candidate or nil if line doesn't match
+local function parse_ss_line(line)
+  -- extract port from address like "127.0.0.1:4096" or "[::1]:4096" or "0.0.0.0:4096"
+  local port = line:match("127%.0%.0%.1:(%d+)")
+    or line:match("%[::1%]:(%d+)")
+    or line:match("0%.0%.0%.0:(%d+)")
+
+  -- extract pid from users:(("opencode",pid=XXXXX,fd=NN))
+  local pid = line:match('pid=(%d+)')
+
+  if port and pid then
+    return { port = tonumber(port), pid = pid }
+  end
+
+  return nil
+end
+
+---Parse ss output to extract all opencode port candidates.
+---@param ss_output string Full output from ss -tlnp | grep opencode
+---@return PortCandidate[] candidates List of port/pid pairs
+local function parse_ss_output(ss_output)
+  local candidates = {}
+
+  if not ss_output or ss_output == "" then
+    return candidates
+  end
+
+  for line in ss_output:gmatch("[^\n]+") do
+    local candidate = parse_ss_line(line)
+    if candidate then
+      table.insert(candidates, candidate)
+    end
+  end
+
+  return candidates
+end
+
+---Find port matching a target cwd from list of candidates.
+---@param candidates PortCandidate[] List of port/pid pairs
+---@param target_cwd string Target working directory to match
+---@param cwd_resolver fun(pid: string): string|nil Function to resolve pid to cwd
+---@return number|nil port Matching port or nil if not found
+local function find_port_for_cwd(candidates, target_cwd, cwd_resolver)
+  for _, candidate in ipairs(candidates) do
+    local proc_cwd = cwd_resolver(candidate.pid)
+    if proc_cwd and proc_cwd == target_cwd then
+      return candidate.port
+    end
+  end
+  return nil
+end
+
+---Read process cwd from /proc filesystem.
+---@param pid string Process ID
+---@return string|nil cwd Working directory or nil if not readable
+local function read_proc_cwd(pid)
+  local proc_cwd_path = string.format("/proc/%s/cwd", pid)
+  local handle = io.popen(string.format("readlink %s 2>/dev/null", proc_cwd_path))
+  if not handle then
+    return nil
+  end
+
+  local cwd = handle:read("*a")
+  handle:close()
+
+  if cwd then
+    return cwd:gsub("%s+$", "") -- trim trailing whitespace
+  end
+
+  return nil
+end
+
+---Discover OpenCode server port by matching process cwd to current directory.
+---Uses `ss` to find listening ports and `/proc/<pid>/cwd` to match working directory.
+---@return number|nil port Discovered port or nil if not found
+---@return string|nil err Error message if discovery failed
+local function discover_port()
+  -- get current working directory (where nvim was started)
+  local cwd = vim.fn.getcwd()
+
+  -- use ss to find opencode processes listening on ports
+  local handle = io.popen("ss -tlnp 2>/dev/null | grep opencode")
+  if not handle then
+    return nil, "failed to run ss command"
+  end
+
+  local output = handle:read("*a")
+  handle:close()
+
+  if not output or output == "" then
+    return nil, "no opencode process found listening"
+  end
+
+  -- parse and find matching port
+  local candidates = parse_ss_output(output)
+  if #candidates == 0 then
+    return nil, "no opencode process found listening"
+  end
+
+  local port = find_port_for_cwd(candidates, cwd, read_proc_cwd)
+  if port then
+    return port, nil
+  end
+
+  return nil, "no opencode process found for directory: " .. cwd
+end
+
+---Get the port to use for OpenCode connections.
+---Returns configured port if set, otherwise discovers from running process.
+---Caches discovered port for subsequent calls.
+---@return number|nil port Port number or nil if unavailable
+---@return string|nil err Error message if port unavailable
+local function get_port()
+  -- use configured port if explicitly set
+  if config.port then
+    return config.port, nil
+  end
+
+  -- return cached discovered port if available
+  if discovered_port then
+    return discovered_port, nil
+  end
+
+  -- attempt discovery
+  local port, err = discover_port()
+  if port then
+    discovered_port = port
+    return port, nil
+  end
+
+  return nil, err
+end
+
+---Clear the discovered port cache.
+---Forces re-discovery on next request.
+local function clear_port_cache() -- luacheck: ignore 211 (exposed via _test)
+  discovered_port = nil
+end
 
 --------------------------------------------------------------------------------
 -- Spinner Functions (private)
@@ -389,9 +543,18 @@ end
 
 ---Check OpenCode server health status.
 ---@param callback fun(healthy: boolean, version_or_err: string) Called with health result
----@return number job_id Job handle for cancellation
+---@return number|nil job_id Job handle for cancellation, nil if port discovery failed
 local function check_health(callback)
-  local url = string.format("http://%s:%d/global/health", config.host, config.port)
+  local port, port_err = get_port()
+  if not port then
+    -- schedule callback to maintain async contract
+    vim.schedule(function()
+      callback(false, port_err or "could not discover opencode port")
+    end)
+    return nil
+  end
+
+  local url = string.format("http://%s:%d/global/health", config.host, port)
 
   return curl_async({
     "curl",
@@ -430,9 +593,17 @@ end
 
 ---Create a new OpenCode session.
 ---@param callback fun(session_id: string|nil, err: string|nil) Called with session ID or error
----@return number job_id Job handle for cancellation
+---@return number|nil job_id Job handle for cancellation, nil if port discovery failed
 local function create_session(callback)
-  local url = string.format("http://%s:%d/session", config.host, config.port)
+  local port, port_err = get_port()
+  if not port then
+    vim.schedule(function()
+      callback(nil, port_err or "could not discover opencode port")
+    end)
+    return nil
+  end
+
+  local url = string.format("http://%s:%d/session", config.host, port)
   local timeout = config.timeout or DEFAULT_REQUEST_TIMEOUT_SECS
 
   -- build request body with optional provider/model overrides
@@ -500,12 +671,20 @@ end
 ---@param message string Message content
 ---@param agent string|nil Agent name (optional)
 ---@param callback fun(response: string|nil, err: string|nil) Called with response text or error
----@return number job_id Job handle for cancellation
+---@return number|nil job_id Job handle for cancellation, nil if port discovery failed
 local function send_message(session_id, message, agent, callback)
+  local port, port_err = get_port()
+  if not port then
+    vim.schedule(function()
+      callback(nil, port_err or "could not discover opencode port")
+    end)
+    return nil
+  end
+
   local url = string.format(
     "http://%s:%d/session/%s/message",
     config.host,
-    config.port,
+    port,
     session_id
   )
   local timeout = config.timeout or DEFAULT_REQUEST_TIMEOUT_SECS
@@ -1141,9 +1320,9 @@ local function validate_config(cfg)
     table.insert(errors, "host must be a non-empty string")
   end
 
-  -- validate port
-  if type(cfg.port) ~= "number" or cfg.port < 1 or cfg.port > 65535 then
-    table.insert(errors, "port must be a number between 1 and 65535")
+  -- validate port (nil = auto-discover, or must be valid port number)
+  if cfg.port ~= nil and (type(cfg.port) ~= "number" or cfg.port < 1 or cfg.port > 65535) then
+    table.insert(errors, "port must be nil (auto-discover) or a number between 1 and 65535")
   end
 
   -- validate timeout if specified
@@ -1400,14 +1579,23 @@ end
 ---@class InlineTestInterface
 ---@field parse_response fun(response: string): number|nil, number|nil, string[]|nil, string|nil
 ---@field strip_code_fences fun(text: string): string
+---@field parse_ss_line fun(line: string): PortCandidate|nil
+---@field parse_ss_output fun(ss_output: string): PortCandidate[]
+---@field find_port_for_cwd fun(candidates: PortCandidate[], target_cwd: string, resolver: function): number|nil
 ---@field get_buffer_queues fun(): table<number, QueuedRequest[]>
 ---@field get_busy_buffers fun(): table<number, boolean>
 ---@field is_buffer_busy fun(bufnr: number): boolean
 ---@field get_queue_length fun(bufnr: number): number
 ---@field clear_all_state fun(): nil
+---@field clear_port_cache fun(): nil
 M._test = {
   parse_response = parse_response,
   strip_code_fences = strip_code_fences,
+
+  -- port discovery functions
+  parse_ss_line = parse_ss_line,
+  parse_ss_output = parse_ss_output,
+  find_port_for_cwd = find_port_for_cwd,
 
   -- queue state accessors for testing
   get_buffer_queues = function()
@@ -1433,6 +1621,10 @@ M._test = {
       active_jobs[key] = nil
     end
     spinners = {}
+  end,
+  -- clear cached port for testing
+  clear_port_cache = function()
+    discovered_port = nil
   end,
 }
 

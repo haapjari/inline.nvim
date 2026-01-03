@@ -46,7 +46,7 @@ describe("inline.nvim error handling", function()
 
       vim.notify = original_notify
       assert.is_not_nil(error_msg)
-      assert.matches("port must be a number between 1 and 65535", error_msg)
+      assert.matches("port must be nil .auto%-discover. or a number between 1 and 65535", error_msg)
     end)
 
     it("rejects invalid port (too high)", function()
@@ -62,7 +62,7 @@ describe("inline.nvim error handling", function()
 
       vim.notify = original_notify
       assert.is_not_nil(error_msg)
-      assert.matches("port must be a number between 1 and 65535", error_msg)
+      assert.matches("port must be nil .auto%-discover. or a number between 1 and 65535", error_msg)
     end)
 
     it("rejects empty host", function()
