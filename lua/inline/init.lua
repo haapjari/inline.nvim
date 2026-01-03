@@ -898,7 +898,8 @@ execute_request = function(request)
         return
       end
 
-      local msg_job_id = send_message(session_id, message, request.agent, function(response, send_err)
+      local msg_job_id = send_message(
+        session_id, message, request.agent, function(response, send_err)
         -- check if cancelled
         if not active_jobs[key] then
           process_next_in_queue(bufnr)

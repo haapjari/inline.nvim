@@ -115,7 +115,7 @@ describe("inline.nvim response parsing", function()
 
       it("handles leading whitespace on REPLACE line", function()
         local response = "  REPLACE 1 4\ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, end_line, _, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(1, start_line)
@@ -124,7 +124,7 @@ describe("inline.nvim response parsing", function()
 
       it("handles trailing whitespace on REPLACE line", function()
         local response = "REPLACE 1 4  \ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, end_line, _, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(1, start_line)
@@ -133,7 +133,7 @@ describe("inline.nvim response parsing", function()
 
       it("handles case-insensitive REPLACE", function()
         local response = "Replace 1 4\ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, end_line, _, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(1, start_line)
@@ -142,7 +142,7 @@ describe("inline.nvim response parsing", function()
 
       it("handles lowercase replace", function()
         local response = "replace 1 4\ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, end_line, _, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(1, start_line)
@@ -151,7 +151,7 @@ describe("inline.nvim response parsing", function()
 
       it("handles mixed case REPLACE", function()
         local response = "RePlAcE 5 10\ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, end_line, _, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(5, start_line)
@@ -160,7 +160,7 @@ describe("inline.nvim response parsing", function()
 
       it("strips trailing empty lines", function()
         local response = "REPLACE 1 2\ncode\n\n\n"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local _, _, code_lines, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(1, #code_lines)
@@ -169,7 +169,7 @@ describe("inline.nvim response parsing", function()
 
       it("preserves intentional empty lines in code", function()
         local response = "REPLACE 1 4\nfunc A() {\n\n\treturn\n}"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local _, _, code_lines, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(4, #code_lines)
@@ -213,7 +213,7 @@ describe("inline.nvim response parsing", function()
 
       it("returns error for REPLACE without line numbers", function()
         local response = "REPLACE\ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, _, _, err = parse_response(response)
 
         assert.is_nil(start_line)
         assert.matches("missing REPLACE header", err)
@@ -221,7 +221,7 @@ describe("inline.nvim response parsing", function()
 
       it("returns error for REPLACE with only one line number", function()
         local response = "REPLACE 1\ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, _, _, err = parse_response(response)
 
         assert.is_nil(start_line)
         assert.matches("missing REPLACE header", err)
@@ -229,7 +229,7 @@ describe("inline.nvim response parsing", function()
 
       it("returns error for REPLACE with non-numeric arguments", function()
         local response = "REPLACE one four\ncode"
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, _, _, err = parse_response(response)
 
         assert.is_nil(start_line)
         assert.matches("missing REPLACE header", err)
@@ -257,7 +257,7 @@ describe("inline.nvim response parsing", function()
       it("handles CRLF line endings", function()
         local response = "REPLACE 1 2\r\ncode line 1\r\ncode line 2"
         -- note: gmatch with [^\n]* will include \r, which is fine for our use case
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, end_line, _, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(1, start_line)
@@ -364,7 +364,7 @@ func Add(a, b int) int {
 	return a + b
 }
 ```]]
-        local start_line, end_line, code_lines, err = parse_response(response)
+        local start_line, end_line, _, err = parse_response(response)
 
         assert.is_nil(err)
         assert.equals(1, start_line)

@@ -86,7 +86,7 @@ describe("inline.nvim request queue", function()
       -- capture notification
       local notified = false
       local orig_notify = vim.notify
-      vim.notify = function(msg, level)
+      vim.notify = function(msg, _)
         if msg:match("no @ai comment found") then
           notified = true
         end
@@ -114,7 +114,7 @@ describe("inline.nvim request queue", function()
       -- capture notification
       local notified_already_queued = false
       local orig_notify = vim.notify
-      vim.notify = function(msg, level)
+      vim.notify = function(msg, _)
         if msg:match("already queued") then
           notified_already_queued = true
         end
@@ -142,7 +142,7 @@ describe("inline.nvim request queue", function()
       -- capture notification for "already processing"
       local notified_processing = false
       local orig_notify = vim.notify
-      vim.notify = function(msg, level)
+      vim.notify = function(msg, _)
         if msg:match("already processing") then
           notified_processing = true
         end
@@ -217,7 +217,7 @@ describe("inline.nvim request queue", function()
       -- capture notification
       local notified_cancelled = false
       local orig_notify = vim.notify
-      vim.notify = function(msg, level)
+      vim.notify = function(msg, _)
         if msg:match("queued request cancelled") then
           notified_cancelled = true
         end

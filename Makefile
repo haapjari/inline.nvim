@@ -130,9 +130,13 @@ verify-lint:
 	@if command -v luacheck >/dev/null 2>&1; then \
 		echo "running luacheck..."; \
 		luacheck lua/ tests/ --config .luacheckrc; \
+	elif [ -x "$$HOME/.luarocks/bin/luacheck" ]; then \
+		echo "running luacheck..."; \
+		"$$HOME/.luarocks/bin/luacheck" lua/ tests/ --config .luacheckrc; \
 	else \
-		echo "luacheck not found, skipping lint"; \
-		echo "  install with: luarocks install luacheck"; \
+		echo "error: luacheck not found"; \
+		echo "  install with: make tools"; \
+		exit 1; \
 	fi
 
 # ============================================================================
