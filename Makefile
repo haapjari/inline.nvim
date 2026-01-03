@@ -178,6 +178,14 @@ release:
 		echo "error: must be on main branch to release"; \
 		exit 1; \
 	fi
+	@# pull latest changes and verify we're in sync with remote
+	@echo "pulling latest changes..."
+	@git fetch origin main
+	@if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse origin/main)" ]; then \
+		echo "error: local main is not in sync with origin/main"; \
+		echo "run 'git pull' or 'git push' to sync before releasing"; \
+		exit 1; \
+	fi
 	@# determine version: if tag exists, bump patch; otherwise use VERSION as-is
 	@VERSION=$(CURRENT_VERSION); \
 	if git rev-parse "v$$VERSION" >/dev/null 2>&1; then \
