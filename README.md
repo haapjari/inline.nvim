@@ -1,5 +1,8 @@
 # inline.nvim
 
+[![Version](https://img.shields.io/github/v/release/haapjari/inline.nvim?style=flat-square)](https://github.com/haapjari/inline.nvim/releases)
+[![License](https://img.shields.io/github/license/haapjari/inline.nvim?style=flat-square)](LICENSE)
+
 > **Note**: This is an experimental plugin, not intended for production use. If you want something featureful and actively maintained, use [avante.nvim](https://github.com/yetone/avante.nvim) or [CodeCompanion](https://github.com/olimorris/codecompanion.nvim). This exists as a learning project and a starting point if you want to build your own.
 
 Simple inline code generation plugin for [nvim](https://neovim.io), which uses [OpenCode](https://opencode.ai) as a backend.
@@ -61,6 +64,21 @@ sequenceDiagram
     { "<leader>ai", "<cmd>InlineRun<cr>", desc = "run inline ai" },
   },
   cmd = { "InlineRun", "InlineStatus", "InlineConfig", "InlineCancel", "InlineValidateConfig" },
+}
+```
+
+### Pinning to a Version
+
+If you encounter issues with a new release, you can pin to a specific version:
+
+```lua
+{
+  "haapjari/inline.nvim",
+  tag = "v0.0.1",  -- pin to specific version
+  -- or: commit = "abc123",  -- pin to specific commit
+  config = function()
+    require("inline").setup({})
+  end,
 }
 ```
 
@@ -172,6 +190,27 @@ flowchart TD
 - Multiple Concurrent Requests.
 - Buffer Change Detection - you can edit your file at the same time, while ai is processing.
 - Custom Prompt Templates.
+
+## Development
+
+### Releasing
+
+Releases are created locally using the Makefile:
+
+```bash
+# auto-increment patch version (0.0.1 -> 0.0.2)
+make release
+
+# for minor/major bumps, edit VERSION file first
+echo "0.1.0" > VERSION  # or "1.0.0" for major
+make release
+```
+
+The `release` target will:
+1. Bump patch version (or use VERSION if manually edited)
+2. Update version in `lua/inline/init.lua`
+3. Commit, tag, and push to main
+4. Create GitHub release with auto-generated notes
 
 ## License
 
