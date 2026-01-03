@@ -255,6 +255,7 @@ func helloWorld() string {
 - Output can have more or fewer lines than the replaced range.
 - For annotations, add clear inline comments explaining what each section does.
 - If you need more context (types, interfaces, related files), use your tools to read them.
+- CRITICAL: Before writing your response, re-read the buffer content above. If code already exists outside your replacement range, do not output it again. Only output the lines within your REPLACE range.
 
 # Final Check Before Responding
 
