@@ -48,6 +48,9 @@ help:
 	@echo "  verify-syntax  - check lua syntax"
 	@echo "  verify-lint    - run luacheck"
 	@echo ""
+	@echo "Release:"
+	@echo "  release        - create new version release (auto-bumps patch)"
+	@echo ""
 	@echo "Development:"
 	@echo "  tools          - install development tools (luacheck, nvim)"
 	@echo "  setup-hooks    - install git pre-commit hooks"
@@ -148,6 +151,80 @@ test:
 		$(NVIM) --headless -u tests/minimal_init.lua \
 			-c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua'}"; \
 	fi
+
+# ============================================================================
+# RELEASE TARGETS
+# ============================================================================
+
+VERSION_FILE := VERSION
+LUA_INIT := lua/inline/init.lua
+
+# read current version from VERSION file
+CURRENT_VERSION := $(shell cat $(VERSION_FILE) 2>/dev/null || echo "0.0.0")
+
+.PHONY: release
+release:
+	@echo "preparing release..."
+	@# check for staged changes (nothing should be staged)
+	@if ! git diff --cached --quiet; then \
+		echo "error: staged changes detected"; \
+		echo "unstage or commit changes before releasing"; \
+		exit 1; \
+	fi
+	@# check for unstaged changes (excluding VERSION and init.lua which we'll modify)
+	@if ! git diff --quiet -- . ':!VERSION' ':!$(LUA_INIT)'; then \
+		echo "error: unstaged changes detected"; \
+		echo "commit or stash changes before releasing"; \
+		exit 1; \
+	fi
+	@# check gh is available
+	@command -v gh >/dev/null 2>&1 || { echo "error: gh (github cli) not found"; exit 1; }
+	@# check we're on main branch
+	@if [ "$$(git branch --show-current)" != "main" ]; then \
+		echo "error: must be on main branch to release"; \
+		exit 1; \
+	fi
+	@# pull latest changes and verify we're in sync with remote
+	@echo "pulling latest changes..."
+	@git fetch origin main
+	@if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse origin/main)" ]; then \
+		echo "error: local main is not in sync with origin/main"; \
+		echo "run 'git pull' or 'git push' to sync before releasing"; \
+		exit 1; \
+	fi
+	@# determine version: if tag exists, bump patch; otherwise use VERSION as-is
+	@VERSION=$(CURRENT_VERSION); \
+	if git rev-parse "v$$VERSION" >/dev/null 2>&1; then \
+		echo "tag v$$VERSION exists, bumping patch version..."; \
+		MAJOR=$$(echo $$VERSION | cut -d. -f1); \
+		MINOR=$$(echo $$VERSION | cut -d. -f2); \
+		PATCH=$$(echo $$VERSION | cut -d. -f3); \
+		PATCH=$$((PATCH + 1)); \
+		VERSION="$$MAJOR.$$MINOR.$$PATCH"; \
+		echo "$$VERSION" > $(VERSION_FILE); \
+		echo "updated VERSION to $$VERSION"; \
+	else \
+		echo "using version $$VERSION from VERSION file"; \
+	fi; \
+	\
+	echo "updating $(LUA_INIT)..."; \
+	sed -i 's/M\.version = "[^"]*"/M.version = "'$$VERSION'"/' $(LUA_INIT); \
+	\
+	echo "committing version bump..."; \
+	git add $(VERSION_FILE) $(LUA_INIT); \
+	git commit -m "chore: release v$$VERSION" || true; \
+	\
+	echo "creating tag v$$VERSION..."; \
+	git tag -a "v$$VERSION" -m "Release v$$VERSION"; \
+	\
+	echo "pushing to origin..."; \
+	git push origin main --tags; \
+	\
+	echo "creating github release..."; \
+	gh release create "v$$VERSION" --generate-notes --title "v$$VERSION"; \
+	\
+	echo ""; \
+	echo "release v$$VERSION complete!"
 
 # ============================================================================
 # CLEANING TARGETS

@@ -3,12 +3,15 @@
 ---@brief ]]
 
 ---@class Inline
+---@field version string Plugin version
 ---@field run fun(opts?: InlineRunOpts): nil Run inline AI on nearest @ai comment
 ---@field status fun(): nil Check OpenCode server health
 ---@field setup fun(opts?: InlineConfig): nil Configure the plugin
 ---@field get_config fun(): InlineConfig Return current configuration
 ---@field show_config fun(): nil Display current configuration
 local M = {}
+
+M.version = "0.0.1"
 
 --------------------------------------------------------------------------------
 -- Constants
@@ -1042,7 +1045,9 @@ end
 ---Display current configuration via vim.notify.
 function M.show_config()
   local lines = {
-    "inline.nvim config:",
+    "inline.nvim v" .. M.version,
+    "",
+    "config:",
     string.format("  host: %s", config.host),
     string.format("  port: %s", config.port),
     string.format("  provider: %s", config.provider or "(opencode default)"),
