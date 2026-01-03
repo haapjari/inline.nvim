@@ -165,9 +165,15 @@ CURRENT_VERSION := $(shell cat $(VERSION_FILE) 2>/dev/null || echo "0.0.0")
 .PHONY: release
 release:
 	@echo "preparing release..."
-	@# check for uncommitted changes (excluding VERSION and init.lua which we'll modify)
+	@# check for staged changes (nothing should be staged)
+	@if ! git diff --cached --quiet; then \
+		echo "error: staged changes detected"; \
+		echo "unstage or commit changes before releasing"; \
+		exit 1; \
+	fi
+	@# check for unstaged changes (excluding VERSION and init.lua which we'll modify)
 	@if ! git diff --quiet -- . ':!VERSION' ':!$(LUA_INIT)'; then \
-		echo "error: uncommitted changes detected"; \
+		echo "error: unstaged changes detected"; \
 		echo "commit or stash changes before releasing"; \
 		exit 1; \
 	fi
