@@ -14,16 +14,52 @@
 
 - %s
 
-# Output (model response, strict)
+# Output Format (STRICT - machine parsed)
 
-CRITICAL: Your response will be parsed programmatically. Any deviation breaks the editor.
+Your response is parsed by a program, not read by a human. Follow this format EXACTLY:
 
-- First line MUST be exactly: `REPLACE <start_line> <end_line>` (nothing before it)
-- Second line onward: replacement code only
-- No explanations, no commentary, no markdown fences, no preamble
-- Do not explain what you're doing—just output the REPLACE header and code
-- The `REPLACE` header is a control line for the editor; it is not part of the file.
-- When adding new lines (e.g., doc comments), `end_line` equals `start_line` (replace the @ai line, output multiple lines).
+```
+REPLACE <start_line> <end_line>
+<replacement code lines>
+```
+
+## Format Rules
+
+1. Line 1: `REPLACE` followed by two integers (start and end line numbers)
+2. Line 2+: The replacement code (will be inserted verbatim into the file)
+3. Nothing else. No markdown fences. No explanations. No "Here's the code:" preamble.
+
+## What NOT to do
+
+WRONG (has preamble):
+```
+Here's the fixed code:
+REPLACE 1 4
+...
+```
+
+WRONG (has markdown fence):
+```
+```go
+REPLACE 1 4
+...
+```
+```
+
+WRONG (missing header):
+```
+func Add(a, b int) int {
+    return a + b
+}
+```
+
+CORRECT:
+```
+REPLACE 1 4
+func Add(a, b int) int {
+    return a + b
+}
+```
 
 # Examples (Input - Output)
 
@@ -220,4 +256,14 @@ func helloWorld() string {
 - For annotations, add clear inline comments explaining what each section does.
 - If you need more context (types, interfaces, related files), use your tools to read them.
 
-IMPORTANT: Output ONLY the REPLACE header and code. No explanations. No preamble. The first characters of your response must be "REPLACE".
+# Final Check Before Responding
+
+Before you output your response, verify:
+1. Does your response start with `REPLACE` (no spaces, no other text before it)?
+2. Is the REPLACE line followed by exactly two space-separated integers?
+3. Is there NO markdown fence (```) wrapping your response?
+4. Is there NO explanatory text before or after the code?
+
+If any check fails, fix it. The parser will reject malformed responses.
+
+OUTPUT FORMAT: `REPLACE <start> <end>` on line 1, then code. Nothing else.

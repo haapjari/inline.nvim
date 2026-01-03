@@ -649,13 +649,14 @@ end
 
 ---Parse AI response in REPLACE format.
 ---Expected format: "REPLACE start_line end_line\ncode..."
+---Handles common model quirks: markdown fences, preamble text, extra whitespace.
 ---@param response string Raw response text
 ---@return number|nil start_line Start line for replacement
 ---@return number|nil end_line End line for replacement
 ---@return string[]|nil code_lines Lines to insert
 ---@return string|nil err Error message if parsing failed
 local function parse_response(response)
-  -- strip markdown fences if present
+  -- strip markdown fences if present (handles ```text, ```lua, etc.)
   response = strip_code_fences(response)
 
   -- split into lines
@@ -673,15 +674,58 @@ local function parse_response(response)
     return nil, nil, nil, "empty response"
   end
 
-  -- parse REPLACE header from first line
-  local start_line, end_line = lines[1]:match("^REPLACE%s+(%d+)%s+(%d+)$")
-  if not start_line then
-    return nil, nil, nil, "missing REPLACE header: " .. lines[1]
+  -- find the REPLACE header line (may not be first if model added preamble)
+  -- patterns to try, in order of strictness:
+  -- 1. exact format: "REPLACE 1 4"
+  -- 2. with extra whitespace: "  REPLACE  1  4  "
+  -- 3. case-insensitive: "Replace 1 4"
+  local replace_line_idx = nil
+  local start_line, end_line
+
+  for i, line in ipairs(lines) do
+    -- try strict match first (trimmed)
+    local trimmed = line:match("^%s*(.-)%s*$")
+    start_line, end_line = trimmed:match("^REPLACE%s+(%d+)%s+(%d+)$")
+    if start_line then
+      replace_line_idx = i
+      break
+    end
+
+    -- try case-insensitive match
+    start_line, end_line = trimmed:match("^[Rr][Ee][Pp][Ll][Aa][Cc][Ee]%s+(%d+)%s+(%d+)$")
+    if start_line then
+      replace_line_idx = i
+      break
+    end
   end
 
-  -- extract code lines (everything after header)
+  if not replace_line_idx then
+    -- provide helpful error with first non-empty line
+    local first_content = ""
+    for _, line in ipairs(lines) do
+      local trimmed = line:match("^%s*(.-)%s*$")
+      if trimmed ~= "" then
+        first_content = trimmed:sub(1, 50)
+        break
+      end
+    end
+    return nil, nil, nil, "missing REPLACE header, got: " .. first_content
+  end
+
+  -- warn if there was preamble (but still proceed)
+  if replace_line_idx > 1 then
+    local preamble_lines = replace_line_idx - 1
+    vim.schedule(function()
+      vim.notify(
+        string.format("ignored %d preamble line(s) before REPLACE header", preamble_lines),
+        vim.log.levels.DEBUG
+      )
+    end)
+  end
+
+  -- extract code lines (everything after REPLACE header)
   local code_lines = {}
-  for i = 2, #lines do
+  for i = replace_line_idx + 1, #lines do
     table.insert(code_lines, lines[i])
   end
 
@@ -1176,5 +1220,19 @@ function M.validate_config()
     end, { timeout = 10 })
   end)
 end
+
+--------------------------------------------------------------------------------
+-- Test Interface (exposed for unit testing only)
+--------------------------------------------------------------------------------
+
+--- Internal functions exposed for testing.
+--- Not part of the public API - may change without notice.
+---@class InlineTestInterface
+---@field parse_response fun(response: string): number|nil, number|nil, string[]|nil, string|nil
+---@field strip_code_fences fun(text: string): string
+M._test = {
+  parse_response = parse_response,
+  strip_code_fences = strip_code_fences,
+}
 
 return M
