@@ -207,7 +207,9 @@ end
 
 ---Discover OpenCode server port by matching process cwd to current directory.
 ---Uses `ss` to find listening ports and `/proc/<pid>/cwd` to match working directory.
+---Falls back to first available instance if no exact match found.
 ---@return number|nil port Discovered port or nil if not found
+---@return string|nil fallback_cwd If using fallback, the cwd of that instance (nil if exact match)
 ---@return string|nil err Error message if discovery failed
 local function discover_port()
   -- get current working directory (where nvim was started)
@@ -229,15 +231,18 @@ local function discover_port()
   -- parse and find matching port
   local candidates = parse_ss_output(output)
   if #candidates == 0 then
-    return nil, "no opencode process found listening"
+    return nil, nil, "no opencode process found listening"
   end
 
   local port = find_port_for_cwd(candidates, cwd, read_proc_cwd)
   if port then
-    return port, nil
+    return port, nil, nil
   end
 
-  return nil, "no opencode process found for directory: " .. cwd
+  -- no exact match - fallback to first available instance
+  local fallback = candidates[1]
+  local fallback_cwd = read_proc_cwd(fallback.pid)
+  return fallback.port, fallback_cwd, nil
 end
 
 ---Get the port to use for OpenCode connections.
@@ -257,13 +262,28 @@ local function get_port()
   end
 
   -- attempt discovery
-  local port, err = discover_port()
+  local port, fallback_cwd, err = discover_port()
+  if err then
+    return nil, err
+  end
+
   if port then
     discovered_port = port
+
+    -- warn if using fallback instance
+    if fallback_cwd then
+      vim.schedule(function()
+        vim.notify(
+          string.format("using opencode from: %s", fallback_cwd),
+          vim.log.levels.WARN
+        )
+      end)
+    end
+
     return port, nil
   end
 
-  return nil, err
+  return nil, "no opencode process found"
 end
 
 ---Clear the discovered port cache.

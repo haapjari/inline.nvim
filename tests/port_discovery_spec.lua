@@ -354,9 +354,35 @@ LISTEN 0      512         127.0.0.1:43209      0.0.0.0:*    users:(("opencode",p
       local review_port = find_port_for_cwd(candidates, "/home/user/review", resolver)
       assert.equals(4096, review_port)
 
-      -- non-existent project
+      -- non-existent project returns nil (fallback handled by discover_port)
       local missing = find_port_for_cwd(candidates, "/home/user/other", resolver)
       assert.is_nil(missing)
+    end)
+
+    it("fallback scenario: temp file with no matching opencode", function()
+      -- scenario: editing a joplin temp file, no opencode running in that dir
+      local ss_output = [[LISTEN 0      512         127.0.0.1:4096       0.0.0.0:*    users:(("opencode",pid=12345,fd=23))]]
+
+      local candidates = parse_ss_output(ss_output)
+      assert.equals(1, #candidates)
+
+      local resolver = function(pid)
+        if pid == "12345" then
+          return "/home/user/my-project"
+        end
+        return nil
+      end
+
+      -- temp file cwd doesn't match any opencode instance
+      local joplin_tmp = "/home/user/.config/joplin/tmp"
+      local port = find_port_for_cwd(candidates, joplin_tmp, resolver)
+
+      -- find_port_for_cwd returns nil, but discover_port will fallback to first
+      assert.is_nil(port)
+
+      -- verify first candidate is available for fallback
+      assert.equals(4096, candidates[1].port)
+      assert.equals("/home/user/my-project", resolver(candidates[1].pid))
     end)
   end)
 end)
