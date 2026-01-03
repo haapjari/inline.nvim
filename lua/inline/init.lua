@@ -205,6 +205,35 @@ local function read_proc_cwd(pid)
   return nil
 end
 
+---Quick synchronous health check for port validation during discovery.
+---Uses short timeout to avoid blocking UI.
+---@param host string Host to check
+---@param port number Port to check
+---@return boolean healthy True if server responds
+local function check_port_health_sync(host, port)
+  local url = string.format("http://%s:%d/global/health", host, port)
+  local cmd = string.format(
+    "curl -s --connect-timeout 1 --max-time 2 %s 2>/dev/null",
+    url
+  )
+
+  local handle = io.popen(cmd)
+  if not handle then
+    return false
+  end
+
+  local result = handle:read("*a")
+  handle:close()
+
+  if not result or result == "" then
+    return false
+  end
+
+  -- check for valid json with healthy status
+  local ok, data = pcall(vim.fn.json_decode, result)
+  return ok and data and data.healthy == true
+end
+
 ---Discover OpenCode server port by matching process cwd to current directory.
 ---Uses `ss` to find listening ports and `/proc/<pid>/cwd` to match working directory.
 ---Falls back to first available instance if no exact match found.
@@ -239,10 +268,15 @@ local function discover_port()
     return port, nil, nil
   end
 
-  -- no exact match - fallback to first available instance
-  local fallback = candidates[1]
-  local fallback_cwd = read_proc_cwd(fallback.pid)
-  return fallback.port, fallback_cwd, nil
+  -- no exact match - try each candidate until one responds
+  for _, candidate in ipairs(candidates) do
+    if check_port_health_sync(config.host, candidate.port) then
+      local fallback_cwd = read_proc_cwd(candidate.pid)
+      return candidate.port, fallback_cwd, nil
+    end
+  end
+
+  return nil, nil, "no responsive opencode instance found"
 end
 
 ---Get the port to use for OpenCode connections.
