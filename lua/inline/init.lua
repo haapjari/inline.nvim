@@ -11,7 +11,7 @@
 ---@field show_config fun(): nil Display current configuration
 local M = {}
 
-M.version = "0.0.5"
+M.version = "0.0.6"
 
 --------------------------------------------------------------------------------
 -- Constants
